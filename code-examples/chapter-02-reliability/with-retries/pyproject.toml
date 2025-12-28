@@ -1,0 +1,16 @@
+[project]
+name = "agent-with-retries"
+version = "0.1.0"
+description = "Task automation agent with retry logic for reliability"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.39.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "black>=24.0.0",
+    "ruff>=0.7.0",
+]
