@@ -1,0 +1,62 @@
+# Prometheus configuration for task automation agent
+#
+# This file configures Prometheus to:
+# - Scrape metrics from the agent
+# - Load alert rules
+# - Store metrics locally
+
+global:
+  scrape_interval: 15s       # Scrape metrics every 15 seconds
+  evaluation_interval: 15s   # Evaluate rules every 15 seconds
+
+  # Attach these labels to all metrics
+  external_labels:
+    cluster: 'production'
+    service: 'task-automation-agent'
+
+# Alert rules
+rule_files:
+  - 'alerts.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Agent metrics
+  - job_name: 'agent'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+    static_configs:
+      - targets: ['localhost:8080']
+        labels:
+          environment: 'production'
+          instance: 'agent-1'
+
+    # Only scrape /metrics endpoint
+    metrics_path: '/metrics'
+
+    # Optional: Relabel instances
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+):.*'
+        replacement: '${1}'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus
+    retention:
+      time: 30d          # Keep metrics for 30 days
+      size: 10GB         # Or until 10GB storage used
+
+# Optional: Remote write to long-term storage
+# remote_write:
+#   - url: "https://your-prometheus-remote-storage.com/api/v1/write"
+#     basic_auth:
+#       username: "your-username"
+#       password: "your-password"

@@ -1,0 +1,245 @@
+# Prometheus alert rules for task automation agent
+#
+# These alerts are based on SLOs (Service Level Objectives):
+# - Availability SLO: 99.9% (error rate < 0.1%)
+# - Latency SLO: p95 < 5 seconds
+# - Error budget: 0.1% over 30 days
+
+groups:
+  - name: agent_slo_alerts
+    interval: 30s
+    rules:
+      # ========================================
+      # Availability SLO Alerts
+      # ========================================
+
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(agent_errors_total[5m]))
+            /
+            sum(rate(agent_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          slo: availability
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 1%)"
+          runbook_url: "https://runbooks.example.com/high-error-rate"
+
+      - alert: CriticalErrorRate
+        expr: |
+          (
+            sum(rate(agent_errors_total[5m]))
+            /
+            sum(rate(agent_requests_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          slo: availability
+        annotations:
+          summary: "CRITICAL: Very high error rate"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          runbook_url: "https://runbooks.example.com/critical-error-rate"
+
+      # ========================================
+      # Latency SLO Alerts
+      # ========================================
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(agent_request_duration_seconds_bucket[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+          slo: latency
+        annotations:
+          summary: "High request latency detected"
+          description: "p95 latency is {{ $value | humanizeDuration }} (SLO: 5s)"
+          runbook_url: "https://runbooks.example.com/high-latency"
+
+      - alert: VeryHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(agent_request_duration_seconds_bucket[5m])
+          ) > 10
+        for: 2m
+        labels:
+          severity: critical
+          slo: latency
+        annotations:
+          summary: "CRITICAL: Very high request latency"
+          description: "p95 latency is {{ $value | humanizeDuration }} (SLO: 5s)"
+          runbook_url: "https://runbooks.example.com/very-high-latency"
+
+      # ========================================
+      # LLM API Alerts
+      # ========================================
+
+      - alert: LLMAPIErrors
+        expr: |
+          sum(rate(llm_requests_total{status="error"}[5m])) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM API errors detected"
+          description: "{{ $value | humanize }} LLM API errors/sec"
+          runbook_url: "https://runbooks.example.com/llm-api-errors"
+
+      - alert: HighTokenUsage
+        expr: |
+          rate(llm_tokens_total[1h]) > 1000000
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "High token usage detected"
+          description: "Using {{ $value | humanize }} tokens/hour (check for cost implications)"
+          runbook_url: "https://runbooks.example.com/high-token-usage"
+
+      # ========================================
+      # Circuit Breaker Alerts
+      # ========================================
+
+      - alert: CircuitBreakerOpen
+        expr: |
+          circuit_breaker_state{state="open"} == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker is open for {{ $labels.name }}"
+          description: "Circuit breaker '{{ $labels.name }}' has opened, indicating repeated failures"
+          runbook_url: "https://runbooks.example.com/circuit-breaker-open"
+
+      - alert: FrequentCircuitBreakerTrips
+        expr: |
+          rate(circuit_breaker_trips_total[1h]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker tripping frequently"
+          description: "Circuit breaker '{{ $labels.name }}' is tripping {{ $value | humanize }} times/hour"
+          runbook_url: "https://runbooks.example.com/frequent-circuit-trips"
+
+      # ========================================
+      # System Health Alerts
+      # ========================================
+
+      - alert: ServiceDown
+        expr: |
+          up{job="agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent service is down"
+          description: "Agent instance {{ $labels.instance }} is not responding"
+          runbook_url: "https://runbooks.example.com/service-down"
+
+      - alert: HighActiveRequests
+        expr: |
+          agent_requests_active > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of active requests"
+          description: "{{ $value }} requests are currently active (possible bottleneck)"
+          runbook_url: "https://runbooks.example.com/high-active-requests"
+
+      # ========================================
+      # Error Budget Burn Rate Alerts
+      # (Multi-window, multi-burn-rate)
+      # ========================================
+
+      # Fast burn: 1% error rate for 1 hour = 10% of monthly budget burned
+      - alert: ErrorBudgetBurnRateFast
+        expr: |
+          (
+            sum(rate(agent_errors_total[1h]))
+            /
+            sum(rate(agent_requests_total[1h]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          slo: error_budget
+        annotations:
+          summary: "CRITICAL: Fast error budget burn"
+          description: "Error rate {{ $value | humanizePercentage }} will exhaust monthly error budget in ~10 hours"
+          runbook_url: "https://runbooks.example.com/error-budget-burn"
+
+      # Slow burn: 0.2% error rate for 6 hours = 12% of monthly budget burned
+      - alert: ErrorBudgetBurnRateSlow
+        expr: |
+          (
+            sum(rate(agent_errors_total[6h]))
+            /
+            sum(rate(agent_requests_total[6h]))
+          ) > 0.002
+        for: 30m
+        labels:
+          severity: warning
+          slo: error_budget
+        annotations:
+          summary: "Slow error budget burn detected"
+          description: "Error rate {{ $value | humanizePercentage }} is consuming error budget faster than expected"
+          runbook_url: "https://runbooks.example.com/error-budget-burn"
+
+  # ========================================
+  # Recording Rules (Pre-compute common queries)
+  # ========================================
+
+  - name: agent_recording_rules
+    interval: 30s
+    rules:
+      # Overall error rate (5m window)
+      - record: job:agent_error_rate:5m
+        expr: |
+          sum(rate(agent_errors_total[5m]))
+          /
+          sum(rate(agent_requests_total[5m]))
+
+      # Overall error rate (1h window)
+      - record: job:agent_error_rate:1h
+        expr: |
+          sum(rate(agent_errors_total[1h]))
+          /
+          sum(rate(agent_requests_total[1h]))
+
+      # p95 latency (5m window)
+      - record: job:agent_latency_p95:5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(agent_request_duration_seconds_bucket[5m])) by (le)
+          )
+
+      # p99 latency (5m window)
+      - record: job:agent_latency_p99:5m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(agent_request_duration_seconds_bucket[5m])) by (le)
+          )
+
+      # Request rate (requests per second)
+      - record: job:agent_request_rate:5m
+        expr: |
+          sum(rate(agent_requests_total[5m]))
+
+      # LLM token rate (tokens per second)
+      - record: job:llm_token_rate:5m
+        expr: |
+          sum(rate(llm_tokens_total[5m]))
+
+      # Estimated cost per hour
+      - record: job:llm_cost_per_hour:1h
+        expr: |
+          sum(rate(llm_cost_usd_total[1h])) * 3600
