@@ -1,0 +1,202 @@
+# Promtail Configuration for Log Collection
+#
+# Promtail collects logs and forwards them to Loki for aggregation
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Agent application logs
+  - job_name: agent
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: agent
+          __path__: /var/log/agent/*.log
+
+    pipeline_stages:
+      # Parse JSON logs (if using structured logging)
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+            request_id: request_id
+            user_id: user_id
+            duration: duration
+            tokens: tokens
+            cost: cost
+
+      # Extract timestamp
+      - timestamp:
+          source: timestamp
+          format: RFC3339
+
+      # Set log level
+      - labels:
+          level:
+
+      # Add request_id as label (for tracing)
+      - labels:
+          request_id:
+
+      # Extract metrics from logs
+      - metrics:
+          # Count log lines by level
+          log_lines_total:
+            type: Counter
+            description: "Total log lines"
+            source: level
+            config:
+              action: inc
+
+  # Redis logs
+  - job_name: redis
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: redis
+          __path__: /var/log/redis/*.log
+
+    pipeline_stages:
+      # Redis log format: level timestamp message
+      - regex:
+          expression: '^(?P<level>[A-Z]+)\s+(?P<timestamp>[\d:\s-]+)\s+(?P<message>.*)$'
+
+      - labels:
+          level:
+
+  # System logs
+  - job_name: system
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: system
+          __path__: /var/log/syslog
+
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<timestamp>[\w\s:]+)\s+(?P<hostname>[\w-]+)\s+(?P<process>[\w-]+)(?:\[(?P<pid>\d+)\])?: (?P<message>.*)$'
+
+      - timestamp:
+          source: timestamp
+          format: "Jan 2 15:04:05"
+
+      - labels:
+          hostname:
+          process:
+
+  # Docker container logs (if running in Docker)
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["logging=promtail"]
+
+    relabel_configs:
+      # Set container name as label
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container'
+
+      # Set container ID as label
+      - source_labels: ['__meta_docker_container_id']
+        target_label: 'container_id'
+
+      # Set image as label
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'service'
+
+    pipeline_stages:
+      # Parse JSON if logs are in JSON format
+      - json:
+          expressions:
+            timestamp:
+            level:
+            message:
+            request_id:
+
+      - labels:
+          level:
+          request_id:
+
+  # Kubernetes pod logs (if running in Kubernetes)
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+
+    relabel_configs:
+      # Only scrape pods in production-agents namespace
+      - source_labels: [__meta_kubernetes_namespace]
+        action: keep
+        regex: production-agents
+
+      # Set namespace label
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+
+      # Set pod name label
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+      # Set container name label
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+
+      # Set app label
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+
+      # Set the log path
+      - source_labels: [__meta_kubernetes_pod_uid, __meta_kubernetes_pod_container_name]
+        target_label: __path__
+        separator: /
+        replacement: /var/log/pods/*$1/*.log
+
+    pipeline_stages:
+      # Remove ANSI color codes
+      - replace:
+          expression: '\x1b\[[0-9;]*m'
+          replace: ''
+
+      # Parse JSON structured logs
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+            request_id: request_id
+            user_id: user_id
+            tokens: tokens
+            cost: cost
+            error: error
+
+      # Extract timestamp
+      - timestamp:
+          source: timestamp
+          format: RFC3339
+
+      # Set labels
+      - labels:
+          level:
+          request_id:
+
+      # Extract error information
+      - regex:
+          source: error
+          expression: '^(?P<error_type>[\w.]+):\s+(?P<error_message>.*)$'
+
+      - labels:
+          error_type:

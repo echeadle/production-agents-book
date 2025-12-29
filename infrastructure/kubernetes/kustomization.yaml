@@ -1,0 +1,74 @@
+# Kustomize Configuration
+# Deploy with: kubectl apply -k .
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace for all resources
+namespace: production-agents
+
+# Common labels applied to all resources
+commonLabels:
+  project: production-agents
+  managed-by: kustomize
+
+# Common annotations
+commonAnnotations:
+  description: "Production AI Agent System"
+  documentation: "https://github.com/your-org/production-agents-book"
+
+# Resources to deploy
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  # NOTE: Create secret.yaml from secret.yaml.template before deploying
+  # - secret.yaml
+  - rbac.yaml
+  - pvc.yaml
+  - redis-statefulset.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - networkpolicy.yaml
+  - servicemonitor.yaml
+
+# Secret generator (alternative to secret.yaml file)
+# Uncomment and fill in after removing secret.yaml from resources
+# secretGenerator:
+#   - name: agent-secrets
+#     literals:
+#       - anthropic-api-key=your_api_key_here
+#       - redis-password=your_redis_password
+
+# ConfigMap generator (for generating from files)
+# configMapGenerator:
+#   - name: agent-config-files
+#     files:
+#       - configs/agent.yaml
+#       - configs/logging.yaml
+
+# Images (for updating image tags)
+images:
+  - name: your-registry/production-agent
+    newName: your-registry/production-agent
+    newTag: latest
+
+# Patches for environment-specific overrides
+# patchesStrategicMerge:
+#   - patches/production.yaml
+
+# Replicas override (for different environments)
+# replicas:
+#   - name: agent-deployment
+#     count: 3
+
+# Resource limits override
+# patchesJson6902:
+#   - target:
+#       version: v1
+#       kind: Deployment
+#       name: agent-deployment
+#     patch: |-
+#       - op: replace
+#         path: /spec/template/spec/containers/0/resources/limits/memory
+#         value: 4Gi

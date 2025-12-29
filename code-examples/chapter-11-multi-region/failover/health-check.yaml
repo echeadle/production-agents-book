@@ -1,0 +1,411 @@
+# Route 53 Health Checks and Failover Configuration
+# Chapter 11: Multi-Region Deployment
+#
+# This configuration demonstrates health checks and failover routing
+# for multi-region deployments using AWS Route 53.
+#
+# Note: This is a declarative YAML representation. In practice, these
+# would be created via Terraform (see terraform/route53.tf) or CloudFormation.
+
+# =========================================================================
+# Health Check Definitions
+# =========================================================================
+
+healthChecks:
+  # US-East Health Check
+  - name: agent-health-us-east
+    type: HTTPS
+    resourcePath: /health
+    fqdn: alb-agent-us-east.company.com
+    port: 443
+    requestInterval: 30  # seconds
+    failureThreshold: 3  # consecutive failures before unhealthy
+    measureLatency: true
+    enableSNI: true
+
+    # Health check protocol
+    protocol: HTTPS
+    searchString: null  # Optional: string to search in response body
+
+    # Alarm configuration
+    alarm:
+      enabled: true
+      alarmName: route53-health-us-east-failed
+      snsTopicArn: arn:aws:sns:us-east-1:123456789:pagerduty
+      evaluationPeriods: 2
+      threshold: 1  # Alert if health check fails
+
+    # Tags
+    tags:
+      Region: us-east-1
+      Environment: production
+      ManagedBy: Terraform
+
+  # EU-West Health Check
+  - name: agent-health-eu-west
+    type: HTTPS
+    resourcePath: /health
+    fqdn: alb-agent-eu-west.company.com
+    port: 443
+    requestInterval: 30
+    failureThreshold: 3
+    measureLatency: true
+    enableSNI: true
+
+    protocol: HTTPS
+
+    alarm:
+      enabled: true
+      alarmName: route53-health-eu-west-failed
+      snsTopicArn: arn:aws:sns:eu-west-1:123456789:pagerduty
+      evaluationPeriods: 2
+      threshold: 1
+
+    tags:
+      Region: eu-west-1
+      Environment: production
+      ManagedBy: Terraform
+
+  # AP-Southeast Health Check
+  - name: agent-health-ap-southeast
+    type: HTTPS
+    resourcePath: /health
+    fqdn: alb-agent-ap-southeast.company.com
+    port: 443
+    requestInterval: 30
+    failureThreshold: 3
+    measureLatency: true
+    enableSNI: true
+
+    protocol: HTTPS
+
+    alarm:
+      enabled: true
+      alarmName: route53-health-ap-southeast-failed
+      snsTopicArn: arn:aws:sns:ap-southeast-1:123456789:pagerduty
+      evaluationPeriods: 2
+      threshold: 1
+
+    tags:
+      Region: ap-southeast-1
+      Environment: production
+      ManagedBy: Terraform
+
+# =========================================================================
+# Failover Routing Policy
+# =========================================================================
+
+failoverRecords:
+  # Primary-Failover Setup: US-East (Primary) → EU-West (Failover)
+  - name: api-failover.agent.company.com
+    type: A
+    ttl: 60  # Low TTL for faster failover
+
+    # Primary record
+    primary:
+      recordType: A
+      failoverType: PRIMARY
+      setIdentifier: primary-us-east
+      healthCheckId: agent-health-us-east
+
+      # Route to US-East ALB
+      alias:
+        dnsName: alb-agent-us-east.company.com
+        hostedZoneId: Z1234567890ABC  # ALB hosted zone ID
+        evaluateTargetHealth: true
+
+    # Failover record (used if primary fails)
+    secondary:
+      recordType: A
+      failoverType: SECONDARY
+      setIdentifier: secondary-eu-west
+      healthCheckId: agent-health-eu-west
+
+      # Route to EU-West ALB
+      alias:
+        dnsName: alb-agent-eu-west.company.com
+        hostedZoneId: Z9876543210XYZ  # ALB hosted zone ID
+        evaluateTargetHealth: true
+
+# =========================================================================
+# Weighted Routing (For Gradual Traffic Shifting)
+# =========================================================================
+
+weightedRecords:
+  # Blue-Green deployment or gradual region migration
+  - name: api-canary.agent.company.com
+    type: A
+    ttl: 60
+
+    # Record 1: US-East (80% of traffic)
+    weights:
+      - weight: 80
+        setIdentifier: us-east-80-percent
+        healthCheckId: agent-health-us-east
+        alias:
+          dnsName: alb-agent-us-east.company.com
+          hostedZoneId: Z1234567890ABC
+          evaluateTargetHealth: true
+
+      # Record 2: EU-West (20% of traffic)
+      - weight: 20
+        setIdentifier: eu-west-20-percent
+        healthCheckId: agent-health-eu-west
+        alias:
+          dnsName: alb-agent-eu-west.company.com
+          hostedZoneId: Z9876543210XYZ
+          evaluateTargetHealth: true
+
+# =========================================================================
+# Multi-Value Answer Routing (For Client-Side Load Balancing)
+# =========================================================================
+
+multiValueRecords:
+  # Return multiple IP addresses, client chooses
+  - name: api-multi.agent.company.com
+    type: A
+    ttl: 60
+
+    values:
+      # US-East
+      - setIdentifier: us-east
+        healthCheckId: agent-health-us-east
+        value: 10.0.1.100  # Example IP
+
+      # EU-West
+      - setIdentifier: eu-west
+        healthCheckId: agent-health-eu-west
+        value: 10.1.1.100  # Example IP
+
+      # AP-Southeast
+      - setIdentifier: ap-southeast
+        healthCheckId: agent-health-ap-southeast
+        value: 10.2.1.100  # Example IP
+
+# =========================================================================
+# Kubernetes Health Check Endpoint Spec
+# =========================================================================
+
+# This is what the /health endpoint should return
+
+healthEndpointSpec:
+  path: /health
+  method: GET
+  port: 8080
+
+  # Expected response for healthy service
+  healthyResponse:
+    statusCode: 200
+    headers:
+      Content-Type: application/json
+    body:
+      status: healthy
+      region: us-east-1
+      version: v1.5.3
+      checks:
+        redis: ok
+        postgres: ok
+        claude_api: ok
+      timestamp: "2024-01-15T12:34:56Z"
+
+  # Expected response for unhealthy service
+  unhealthyResponse:
+    statusCode: 503  # Service Unavailable
+    headers:
+      Content-Type: application/json
+    body:
+      status: unhealthy
+      region: us-east-1
+      version: v1.5.3
+      checks:
+        redis: ok
+        postgres: ok
+        claude_api: degraded  # Circuit breaker open
+      timestamp: "2024-01-15T12:34:56Z"
+
+  # Kubernetes liveness/readiness probe configuration
+  kubernetesProbes:
+    livenessProbe:
+      httpGet:
+        path: /health/live
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+    readinessProbe:
+      httpGet:
+        path: /health/ready
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 2
+
+# =========================================================================
+# Failover Testing Procedure
+# =========================================================================
+
+failoverTesting:
+  # How to test failover without causing real outage
+
+  steps:
+    - step: 1
+      action: "Simulate primary region failure"
+      command: |
+        # Method 1: Make health check endpoint return 503
+        kubectl set env deployment/agent-deployment SIMULATE_FAILURE=true -n production-agents
+
+        # Method 2: Block Route 53 health checker IPs at ALB
+        aws elbv2 modify-listener --listener-arn <arn> --default-actions Type=fixed-response,FixedResponseConfig={StatusCode=503}
+
+    - step: 2
+      action: "Wait for health check to fail (90 seconds)"
+      details: "3 failures × 30s interval = 90s"
+
+    - step: 3
+      action: "Verify DNS failover"
+      command: |
+        # Check DNS resolution switches to failover region
+        dig api-failover.agent.company.com
+
+        # Should now return EU-West ALB address
+
+    - step: 4
+      action: "Verify traffic flows to failover region"
+      command: |
+        # Test API endpoint
+        curl https://api-failover.agent.company.com/health
+
+        # Check CloudWatch metrics - traffic should shift to EU
+
+    - step: 5
+      action: "Restore primary region"
+      command: |
+        kubectl set env deployment/agent-deployment SIMULATE_FAILURE=false -n production-agents
+
+    - step: 6
+      action: "Wait for health check to pass (90 seconds)"
+      details: "Health restored, DNS should failback"
+
+    - step: 7
+      action: "Verify failback to primary"
+      command: |
+        dig api-failover.agent.company.com
+        # Should return US-East ALB address again
+
+  # Expected metrics during test
+  expectedMetrics:
+    - metric: route53_health_check_status
+      primary_before: 1  # Healthy
+      primary_during: 0  # Unhealthy
+      primary_after: 1   # Healthy
+
+    - metric: traffic_distribution
+      primary_before: 100%
+      failover_during: 100%
+      primary_after: 100%
+
+  # Duration
+  totalDuration: "~5 minutes"
+  downtime: "0 (zero) - failover is automatic"
+
+# =========================================================================
+# Monitoring and Alerts
+# =========================================================================
+
+monitoring:
+  # CloudWatch metrics to monitor
+  cloudwatchMetrics:
+    - namespace: AWS/Route53
+      metrics:
+        - HealthCheckStatus  # 0 = unhealthy, 1 = healthy
+        - HealthCheckPercentageHealthy
+        - ChildHealthCheckHealthyCount
+        - ConnectionTime  # Latency
+        - SSLHandshakeTime
+        - TimeToFirstByte
+
+  # Grafana dashboard panels
+  grafanaPanels:
+    - title: "Regional Health Status"
+      query: |
+        aws_route53_health_check_status{region=~"us-east-1|eu-west-1|ap-southeast-1"}
+
+    - title: "Failover Events"
+      query: |
+        changes(aws_route53_health_check_status[5m]) > 0
+
+    - title: "Health Check Latency"
+      query: |
+        aws_route53_health_check_time_to_first_byte
+
+  # PagerDuty alerts
+  alerts:
+    - name: "Primary Region Unhealthy"
+      severity: critical
+      condition: route53_health_check_status{region="us-east-1"} == 0
+      duration: 2m
+      action: "Page on-call immediately - primary region down"
+
+    - name: "Failover Activated"
+      severity: warning
+      condition: changes(route53_health_check_status[5m]) > 0
+      action: "Notify #incidents - automatic failover occurred"
+
+    - name: "All Regions Unhealthy"
+      severity: critical
+      condition: |
+        sum(route53_health_check_status) == 0
+      action: "Page entire on-call rotation - complete outage"
+
+# =========================================================================
+# Best Practices
+# =========================================================================
+
+bestPractices:
+  - practice: "Set failureThreshold to 3+ consecutive failures"
+    reason: "Prevents false positives from transient network issues"
+
+  - practice: "Use low TTL (60s) for failover records"
+    reason: "Faster DNS cache expiration = faster failover"
+
+  - practice: "Always configure CloudWatch alarms"
+    reason: "Get notified when health checks fail before users complain"
+
+  - practice: "Test failover monthly"
+    reason: "Ensure failover actually works when you need it"
+
+  - practice: "Monitor Route 53 query metrics"
+    reason: "Understand traffic patterns and DNS resolution behavior"
+
+  - practice: "Use evaluateTargetHealth: true for ALB"
+    reason: "Automatically fails over if ALB itself is unhealthy"
+
+  - practice: "Have runbook for manual failover"
+    reason: "Sometimes you need to force failover (e.g., during maintenance)"
+
+# =========================================================================
+# Cost Estimation
+# =========================================================================
+
+costs:
+  # Route 53 health checks: $0.50/month per health check
+  healthChecks: 3 × $0.50 = $1.50/month
+
+  # Route 53 hosted zone: $0.50/month
+  hostedZone: $0.50/month
+
+  # Route 53 queries: $0.40 per million queries
+  queries: ~100M queries/month × $0.40 = $40/month
+
+  # CloudWatch alarms: $0.10/alarm/month (first 10 free)
+  alarms: Free (only 3 alarms)
+
+  # Total Route 53 costs
+  total: ~$42/month
+
+  # Note: ALB costs ($16/month) and EC2 costs are separate

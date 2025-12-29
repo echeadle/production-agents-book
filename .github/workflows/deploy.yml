@@ -1,0 +1,288 @@
+# GitHub Actions Workflow: Deploy
+#
+# Runs on: Manual trigger, successful builds on main
+# Purpose: Deploy to Kubernetes cluster
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      image_tag:
+        description: 'Docker image tag to deploy (default: latest from main)'
+        required: false
+        type: string
+
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  KUBECTL_VERSION: "1.28.0"
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment || 'dev' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: ${{ github.event.inputs.environment || 'dev' }}
+      url: ${{ steps.get-url.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Verify cluster connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Determine image tag
+        id: image-tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=main-${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy with Kustomize
+        env:
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          cd infrastructure/kubernetes
+
+          # Update image in kustomization.yaml
+          kustomize edit set image \
+            your-registry/production-agent=ghcr.io/${{ github.repository }}/agent:$IMAGE_TAG
+
+          # Apply configuration
+          kubectl apply -k . -n production-agents
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/agent-deployment \
+            -n production-agents \
+            --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n production-agents
+          kubectl get hpa -n production-agents
+          kubectl get svc -n production-agents
+
+      - name: Run smoke tests
+        id: smoke-tests
+        run: |
+          # Get service URL
+          SERVICE_URL=$(kubectl get svc agent-service \
+            -n production-agents \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+          # Wait for load balancer
+          echo "Waiting for load balancer..."
+          for i in {1..30}; do
+            if curl -f -s "http://$SERVICE_URL/health" > /dev/null; then
+              echo "Load balancer ready!"
+              break
+            fi
+            echo "Attempt $i/30..."
+            sleep 10
+          done
+
+          # Run smoke tests
+          curl -f "http://$SERVICE_URL/health" || exit 1
+          curl -f "http://$SERVICE_URL/ready" || exit 1
+          curl -f "http://$SERVICE_URL/metrics" || exit 1
+
+          echo "url=http://$SERVICE_URL" >> $GITHUB_OUTPUT
+
+      - name: Get deployment URL
+        id: get-url
+        run: |
+          URL=$(kubectl get svc agent-service \
+            -n production-agents \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "url=http://$URL" >> $GITHUB_OUTPUT
+
+      - name: Post deployment notifications
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Deployment to ${{ github.event.inputs.environment || 'dev' }} ${{ job.status }}
+            Image: ${{ steps.image-tag.outputs.tag }}
+            URL: ${{ steps.get-url.outputs.url }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  rollback:
+    name: Rollback (if needed)
+    runs-on: ubuntu-latest
+    if: failure() && github.event.inputs.environment == 'production'
+    needs: deploy
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+
+      - name: Rollback deployment
+        run: |
+          kubectl rollout undo deployment/agent-deployment \
+            -n production-agents
+
+      - name: Wait for rollback
+        run: |
+          kubectl rollout status deployment/agent-deployment \
+            -n production-agents \
+            --timeout=5m
+
+      - name: Notify rollback
+        uses: 8398a7/action-slack@v3
+        with:
+          status: 'warning'
+          text: |
+            ⚠️ Deployment failed - rolled back to previous version
+            Environment: production
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  canary-deploy:
+    name: Canary Deployment
+    runs-on: ubuntu-latest
+    if: github.event.inputs.environment == 'production'
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+
+      - name: Deploy canary (10%)
+        run: |
+          # Create canary deployment with 10% traffic
+          kubectl apply -f infrastructure/kubernetes/canary-deployment.yaml
+
+          # Wait for canary to be ready
+          kubectl rollout status deployment/agent-canary \
+            -n production-agents \
+            --timeout=5m
+
+      - name: Monitor canary metrics
+        run: |
+          # Monitor for 10 minutes
+          echo "Monitoring canary deployment..."
+          sleep 600
+
+          # Check error rate (should be < 1%)
+          ERROR_RATE=$(kubectl exec -n monitoring prometheus-0 -- \
+            promtool query instant \
+            'rate(agent_errors_total{deployment="canary"}[5m]) / rate(agent_requests_total{deployment="canary"}[5m])')
+
+          if [ "$ERROR_RATE" -gt "0.01" ]; then
+            echo "❌ Canary error rate too high: $ERROR_RATE"
+            exit 1
+          fi
+
+          # Check latency (P95 should be < 30s)
+          LATENCY=$(kubectl exec -n monitoring prometheus-0 -- \
+            promtool query instant \
+            'histogram_quantile(0.95, rate(agent_request_duration_seconds_bucket{deployment="canary"}[5m]))')
+
+          if [ "$LATENCY" -gt "30" ]; then
+            echo "❌ Canary latency too high: $LATENCY"
+            exit 1
+          fi
+
+          echo "✅ Canary metrics look good!"
+
+      - name: Promote canary to full deployment
+        run: |
+          # Update main deployment with new image
+          kubectl set image deployment/agent-deployment \
+            agent=ghcr.io/${{ github.repository }}/agent:${{ steps.image-tag.outputs.tag }} \
+            -n production-agents
+
+          # Wait for rollout
+          kubectl rollout status deployment/agent-deployment \
+            -n production-agents \
+            --timeout=10m
+
+          # Delete canary
+          kubectl delete deployment agent-canary -n production-agents
+
+      - name: Rollback canary on failure
+        if: failure()
+        run: |
+          echo "❌ Canary deployment failed - rolling back"
+          kubectl delete deployment agent-canary -n production-agents
+
+  deploy-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [deploy]
+
+    steps:
+      - name: Deployment status
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "✅ Deployment successful!"
+            echo "Environment: ${{ github.event.inputs.environment || 'dev' }}"
+            echo "Image: ${{ needs.deploy.outputs.image_tag }}"
+          else
+            echo "❌ Deployment failed"
+            exit 1
+          fi

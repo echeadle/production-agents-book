@@ -1,0 +1,339 @@
+# Prometheus Alert Rules for AI Agent System
+#
+# Alert severity levels:
+# - critical: Immediate action required (page on-call)
+# - warning: Attention needed soon (create ticket)
+# - info: Informational (log only)
+
+groups:
+  # Agent Health and Availability
+  - name: agent_health
+    interval: 30s
+    rules:
+      - alert: AgentDown
+        expr: up{job="agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: agent
+        annotations:
+          summary: "Agent instance {{ $labels.instance }} is down"
+          description: "Agent has been down for more than 1 minute. Check pod status and logs."
+          runbook: "https://docs.example.com/runbooks/agent-down"
+
+      - alert: AgentHighRestartRate
+        expr: rate(kube_pod_container_status_restarts_total{pod=~"agent-.*"}[15m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: agent
+        annotations:
+          summary: "Agent pod {{ $labels.pod }} is restarting frequently"
+          description: "Agent pod has restarted {{ $value }} times in the last 15 minutes."
+
+      - alert: AgentNotReady
+        expr: sum(kube_pod_status_ready{pod=~"agent-.*", condition="true"}) / sum(kube_pod_status_ready{pod=~"agent-.*"}) < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: agent
+        annotations:
+          summary: "Less than 80% of agent pods are ready"
+          description: "Only {{ $value | humanizePercentage }} of agent pods are ready."
+
+  # Request Rate and Latency
+  - name: agent_performance
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: rate(agent_errors_total[5m]) / rate(agent_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: agent
+        annotations:
+          summary: "High error rate detected: {{ $value | humanizePercentage }}"
+          description: "Error rate is above 5% for the last 5 minutes. Current: {{ $value | humanizePercentage }}"
+          runbook: "https://docs.example.com/runbooks/high-error-rate"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(agent_request_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+          component: agent
+        annotations:
+          summary: "High latency detected: P95 {{ $value }}s"
+          description: "95th percentile latency is above 30 seconds for the last 5 minutes."
+
+      - alert: VeryHighLatency
+        expr: histogram_quantile(0.99, rate(agent_request_duration_seconds_bucket[5m])) > 60
+        for: 2m
+        labels:
+          severity: critical
+          component: agent
+        annotations:
+          summary: "Very high latency detected: P99 {{ $value }}s"
+          description: "99th percentile latency is above 60 seconds. Users experiencing severe delays."
+
+      - alert: LowRequestRate
+        expr: rate(agent_requests_total[10m]) < 0.1
+        for: 15m
+        labels:
+          severity: info
+          component: agent
+        annotations:
+          summary: "Unusually low request rate: {{ $value }}/s"
+          description: "Request rate is below 0.1 req/s. May indicate upstream issues."
+
+  # Cost and Token Usage
+  - name: agent_cost
+    interval: 1m
+    rules:
+      - alert: HighTokenUsage
+        expr: rate(agent_tokens_used_total[5m]) > 100000
+        for: 5m
+        labels:
+          severity: warning
+          component: cost
+        annotations:
+          summary: "High token usage: {{ $value }}/s tokens"
+          description: "Token usage rate is {{ $value }}/s, which is unusually high."
+
+      - alert: DailyBudgetExceeded
+        expr: sum(increase(agent_tokens_used_total[24h])) > 10000000
+        labels:
+          severity: critical
+          component: cost
+        annotations:
+          summary: "Daily token budget exceeded"
+          description: "Used {{ $value }} tokens in the last 24h, exceeding the 10M budget."
+
+      - alert: CostSpike
+        expr: |
+          (
+            rate(agent_cost_dollars_total[5m])
+            /
+            avg_over_time(rate(agent_cost_dollars_total[5m])[1h:5m])
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: cost
+        annotations:
+          summary: "Cost spike detected"
+          description: "Cost rate is 2x higher than the 1-hour average."
+
+  # Circuit Breaker and Resilience
+  - name: agent_resilience
+    interval: 30s
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: agent_circuit_breaker_state{state="open"} == 1
+        for: 2m
+        labels:
+          severity: warning
+          component: resilience
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.circuit }}"
+          description: "Circuit breaker has been open for 2 minutes. Requests are being rejected."
+
+      - alert: HighRetryRate
+        expr: rate(agent_retries_total[5m]) / rate(agent_requests_total[5m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: resilience
+        annotations:
+          summary: "High retry rate: {{ $value | humanizePercentage }}"
+          description: "More than 20% of requests are being retried."
+
+      - alert: TimeoutSpike
+        expr: rate(agent_timeouts_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: resilience
+        annotations:
+          summary: "Timeout spike: {{ $value }}/s timeouts"
+          description: "Experiencing {{ $value }}/s timeouts. API may be slow."
+
+  # Redis Health
+  - name: redis_health
+    interval: 30s
+    rules:
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: redis
+        annotations:
+          summary: "Redis instance {{ $labels.instance }} is down"
+          description: "Redis has been down for more than 1 minute."
+
+      - alert: RedisHighMemoryUsage
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis memory usage high: {{ $value | humanizePercentage }}"
+          description: "Redis is using {{ $value | humanizePercentage }} of max memory."
+
+      - alert: RedisLowCacheHitRate
+        expr: rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) < 0.5
+        for: 10m
+        labels:
+          severity: info
+          component: redis
+        annotations:
+          summary: "Low cache hit rate: {{ $value | humanizePercentage }}"
+          description: "Cache hit rate is below 50%. Consider cache warming or TTL tuning."
+
+      - alert: RedisSlowQueries
+        expr: redis_slowlog_length > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: redis
+        annotations:
+          summary: "Redis has {{ $value }} slow queries"
+          description: "Check slow query log for performance issues."
+
+  # Resource Utilization
+  - name: agent_resources
+    interval: 30s
+    rules:
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{pod=~"agent-.*"}[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: resources
+        annotations:
+          summary: "High CPU usage on {{ $labels.pod }}: {{ $value | humanizePercentage }}"
+          description: "CPU usage has been above 80% for 10 minutes."
+
+      - alert: HighMemoryUsage
+        expr: container_memory_working_set_bytes{pod=~"agent-.*"} / container_spec_memory_limit_bytes{pod=~"agent-.*"} > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: resources
+        annotations:
+          summary: "High memory usage on {{ $labels.pod }}: {{ $value | humanizePercentage }}"
+          description: "Memory usage has been above 90% for 5 minutes. May OOM soon."
+
+      - alert: HighDiskUsage
+        expr: (node_filesystem_size_bytes - node_filesystem_free_bytes) / node_filesystem_size_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: resources
+        annotations:
+          summary: "High disk usage on {{ $labels.instance }}: {{ $value | humanizePercentage }}"
+          description: "Disk usage is above 85%. Consider cleanup or expansion."
+
+  # API Health (Anthropic API)
+  - name: external_api
+    interval: 1m
+    rules:
+      - alert: AnthropicAPIHighErrorRate
+        expr: rate(agent_anthropic_api_errors_total[5m]) / rate(agent_anthropic_api_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          component: external_api
+        annotations:
+          summary: "High Anthropic API error rate: {{ $value | humanizePercentage }}"
+          description: "More than 10% of Anthropic API calls are failing."
+
+      - alert: AnthropicAPIRateLimited
+        expr: rate(agent_anthropic_api_rate_limited_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: external_api
+        annotations:
+          summary: "Being rate limited by Anthropic API"
+          description: "Experiencing {{ $value }}/s rate limit errors. Reduce request rate."
+
+      - alert: AnthropicAPISlowResponse
+        expr: histogram_quantile(0.95, rate(agent_anthropic_api_duration_seconds_bucket[5m])) > 15
+        for: 5m
+        labels:
+          severity: warning
+          component: external_api
+        annotations:
+          summary: "Slow Anthropic API responses: P95 {{ $value }}s"
+          description: "Anthropic API P95 latency is above 15 seconds."
+
+  # SLO Alerts
+  - name: slo_alerts
+    interval: 5m
+    rules:
+      - alert: ErrorBudgetBurnRateFast
+        expr: |
+          (
+            rate(agent_errors_total[5m]) / rate(agent_requests_total[5m])
+            >
+            (1 - 0.999) * 14.4  # Burning through 99.9% SLO budget 14.4x faster than allowed
+          )
+        for: 5m
+        labels:
+          severity: critical
+          component: slo
+        annotations:
+          summary: "Fast error budget burn rate"
+          description: "At current error rate, will exhaust monthly error budget in < 2 days."
+
+      - alert: ErrorBudgetBurnRateSlow
+        expr: |
+          (
+            rate(agent_errors_total[1h]) / rate(agent_requests_total[1h])
+            >
+            (1 - 0.999) * 3  # Burning through budget 3x faster than allowed
+          )
+        for: 1h
+        labels:
+          severity: warning
+          component: slo
+        annotations:
+          summary: "Slow error budget burn rate"
+          description: "At current error rate, will exhaust monthly error budget in < 10 days."
+
+      - alert: LatencySLOViolation
+        expr: histogram_quantile(0.99, rate(agent_request_duration_seconds_bucket[5m])) > 30
+        for: 10m
+        labels:
+          severity: warning
+          component: slo
+        annotations:
+          summary: "Latency SLO violated: P99 {{ $value }}s"
+          description: "P99 latency exceeds 30s SLO for 10 minutes."
+
+  # Security Alerts
+  - name: security
+    interval: 1m
+    rules:
+      - alert: HighPromptInjectionAttempts
+        expr: rate(agent_prompt_injection_blocked_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "High rate of prompt injection attempts: {{ $value }}/s"
+          description: "Detecting {{ $value }}/s prompt injection attempts. Review logs."
+
+      - alert: HighContentModerationRate
+        expr: rate(agent_content_moderated_total[5m]) / rate(agent_requests_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: info
+          component: security
+        annotations:
+          summary: "High content moderation rate: {{ $value | humanizePercentage }}"
+          description: "More than 10% of requests are being moderated."

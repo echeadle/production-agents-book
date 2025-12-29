@@ -1,0 +1,326 @@
+# GitHub Actions Workflow: Security
+#
+# Runs on: Pull requests, pushes, schedule
+# Purpose: Security scanning (dependencies, code, containers, secrets)
+
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  dependency-scan:
+    name: Scan Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          cd code-examples/reference-agent
+          uv sync
+
+      - name: Run pip-audit (vulnerability scanner)
+        run: |
+          uv pip install pip-audit
+          cd code-examples/reference-agent
+          uv run pip-audit --format json --output audit-report.json || true
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit-report
+          path: code-examples/reference-agent/audit-report.json
+
+      - name: Check for vulnerabilities
+        run: |
+          cd code-examples/reference-agent
+          if [ -f audit-report.json ]; then
+            vulnerabilities=$(jq '.vulnerabilities | length' audit-report.json)
+            if [ "$vulnerabilities" -gt 0 ]; then
+              echo "⚠️ Found $vulnerabilities vulnerabilities!"
+              jq '.vulnerabilities[] | "\(.name): \(.id) - \(.summary)"' audit-report.json
+              exit 1
+            fi
+          fi
+
+  code-security:
+    name: Code Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install bandit
+        run: uv pip install bandit[toml]
+
+      - name: Run Bandit (security linter)
+        run: |
+          bandit -r code-examples/ \
+            -f json \
+            -o bandit-report.json \
+            --severity-level medium \
+            --confidence-level medium \
+            || true
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+
+      - name: Check Bandit results
+        run: |
+          if [ -f bandit-report.json ]; then
+            issues=$(jq '.metrics._totals.SEVERITY.MEDIUM + .metrics._totals.SEVERITY.HIGH' bandit-report.json)
+            if [ "$issues" -gt 0 ]; then
+              echo "⚠️ Found $issues security issues!"
+              jq '.results[] | "[\(.severity)] \(.filename):\(.line_number) - \(.issue_text)"' bandit-report.json
+              exit 1
+            fi
+          fi
+
+  secret-scan:
+    name: Scan for Secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scanning
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+          GITLEAKS_ENABLE_SUMMARY: true
+
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['python']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          upload: true
+
+  container-scan:
+    name: Scan Container Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          cd infrastructure/docker
+          docker build -t agent:test \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -f Dockerfile \
+            ../../code-examples/reference-agent/
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'agent:test'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy (table output)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'agent:test'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+
+  terraform-security:
+    name: Scan Terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: infrastructure/terraform/aws
+          format: sarif
+          soft_fail: false
+
+      - name: Upload tfsec results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+
+  kubernetes-security:
+    name: Scan Kubernetes Manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run kubesec
+        uses: controlplaneio/kubesec-action@v0.0.2
+        with:
+          input: infrastructure/kubernetes/deployment.yaml
+          format: json
+
+      - name: Run Polaris
+        run: |
+          wget https://github.com/FairwindsOps/polaris/releases/download/8.5.0/polaris_linux_amd64.tar.gz
+          tar -xzf polaris_linux_amd64.tar.gz
+          ./polaris audit \
+            --audit-path infrastructure/kubernetes/ \
+            --format=pretty \
+            --set-exit-code-on-danger
+
+  sbom-generation:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install CycloneDX
+        run: uv pip install cyclonedx-bom
+
+      - name: Generate SBOM
+        run: |
+          cd code-examples/reference-agent
+          cyclonedx-py \
+            --format json \
+            --output sbom.json \
+            requirements \
+            pyproject.toml
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: code-examples/reference-agent/sbom.json
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [dependency-scan, code-security, secret-scan, codeql, container-scan, terraform-security, kubernetes-security]
+
+    steps:
+      - name: Check security results
+        run: |
+          failed_jobs=""
+
+          if [ "${{ needs.dependency-scan.result }}" != "success" ]; then
+            failed_jobs="$failed_jobs\n- Dependency scan"
+          fi
+
+          if [ "${{ needs.code-security.result }}" != "success" ]; then
+            failed_jobs="$failed_jobs\n- Code security scan"
+          fi
+
+          if [ "${{ needs.secret-scan.result }}" != "success" ]; then
+            failed_jobs="$failed_jobs\n- Secret scan"
+          fi
+
+          if [ "${{ needs.container-scan.result }}" != "success" ]; then
+            failed_jobs="$failed_jobs\n- Container scan"
+          fi
+
+          if [ "${{ needs.terraform-security.result }}" != "success" ]; then
+            failed_jobs="$failed_jobs\n- Terraform security"
+          fi
+
+          if [ "${{ needs.kubernetes-security.result }}" != "success" ]; then
+            failed_jobs="$failed_jobs\n- Kubernetes security"
+          fi
+
+          if [ -n "$failed_jobs" ]; then
+            echo "❌ Security checks failed:$failed_jobs"
+            exit 1
+          fi
+
+          echo "✅ All security checks passed!"

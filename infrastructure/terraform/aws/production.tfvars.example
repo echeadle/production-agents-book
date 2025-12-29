@@ -1,0 +1,45 @@
+# Production Environment Configuration
+#
+# Copy this file to production.tfvars and fill in your values
+# NEVER commit production.tfvars to version control!
+
+# General
+project_name = "production-agents"
+environment  = "production"
+aws_region   = "us-west-2"
+cost_center  = "engineering"
+
+# Networking
+vpc_cidr                  = "10.0.0.0/16"
+availability_zones_count  = 3
+private_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+public_subnet_cidrs       = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+# EKS Cluster
+kubernetes_version              = "1.28"
+cluster_endpoint_public_access  = true
+node_instance_types             = ["t3.xlarge"]  # Larger for production
+node_capacity_type              = "ON_DEMAND"    # Use ON_DEMAND for stability
+node_group_min_size             = 3
+node_group_max_size             = 20             # Higher for production scaling
+node_group_desired_size         = 5
+
+# Redis
+redis_engine_version           = "7.0"
+redis_node_type                = "cache.r6g.large"  # Memory-optimized for production
+redis_num_replicas             = 3                  # Multi-AZ for HA
+redis_snapshot_retention_days  = 14                 # Longer retention
+
+# Secrets (NEVER commit actual values!)
+anthropic_api_key = "YOUR_ANTHROPIC_API_KEY_HERE"  # Replace with actual key
+
+# Monitoring
+log_retention_days = 90  # Longer for compliance
+alert_email        = "ops-team@example.com"
+
+# Additional tags
+additional_tags = {
+  Owner       = "platform-team"
+  Compliance  = "SOC2"
+  DataClass   = "confidential"
+}

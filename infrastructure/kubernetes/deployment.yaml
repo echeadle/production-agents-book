@@ -1,0 +1,194 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-deployment
+  namespace: production-agents
+  labels:
+    app: production-agent
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Zero-downtime deployments
+  selector:
+    matchLabels:
+      app: production-agent
+  template:
+    metadata:
+      labels:
+        app: production-agent
+        version: v1
+      annotations:
+        # Prometheus scraping annotations
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Security Context
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Service Account (create separately if needed for RBAC)
+      serviceAccountName: agent-service-account
+
+      # Init Container - Wait for dependencies
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z redis-service 6379; do
+                echo "Waiting for Redis..."
+                sleep 2
+              done
+
+      containers:
+        - name: agent
+          image: your-registry/production-agent:latest
+          imagePullPolicy: IfNotPresent
+
+          # Ports
+          ports:
+            - name: metrics
+              containerPort: 8000
+              protocol: TCP
+
+          # Environment Variables from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: agent-config
+
+          # Environment Variables from Secret
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: anthropic-api-key
+
+          # Volume Mounts
+          volumeMounts:
+            - name: agent-data
+              mountPath: /app/data
+            - name: agent-logs
+              mountPath: /app/logs
+            - name: config-file
+              mountPath: /app/config
+              readOnly: true
+
+          # Resource Limits
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+
+          # Liveness Probe - Is the container alive?
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+          # Readiness Probe - Is the container ready to serve traffic?
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+
+          # Startup Probe - For slow-starting containers
+          startupProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30  # 5 minutes max startup time
+
+          # Security Context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # Set to true if agent doesn't need writes
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+
+          # Lifecycle Hooks
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    # Graceful shutdown - finish current requests
+                    sleep 15
+
+      # Volumes
+      volumes:
+        - name: agent-data
+          persistentVolumeClaim:
+            claimName: agent-data-pvc
+        - name: agent-logs
+          emptyDir: {}
+        - name: config-file
+          configMap:
+            name: agent-config
+            items:
+              - key: agent.yaml
+                path: agent.yaml
+
+      # DNS Configuration
+      dnsPolicy: ClusterFirst
+
+      # Restart Policy
+      restartPolicy: Always
+
+      # Termination Grace Period - Allow time for graceful shutdown
+      terminationGracePeriodSeconds: 30
+
+      # Affinity Rules - Don't schedule all pods on same node
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - production-agent
+                topologyKey: kubernetes.io/hostname
+
+      # Tolerations (if using node taints)
+      # tolerations:
+      #   - key: "workload"
+      #     operator: "Equal"
+      #     value: "agent"
+      #     effect: "NoSchedule"

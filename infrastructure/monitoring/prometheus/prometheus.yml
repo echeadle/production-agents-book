@@ -1,0 +1,138 @@
+# Prometheus Configuration for AI Agent Monitoring
+#
+# This configuration sets up scraping for:
+# - Agent metrics (request rates, errors, token usage)
+# - Redis metrics (cache performance, memory usage)
+# - System metrics (CPU, memory, network)
+
+global:
+  scrape_interval: 15s      # Scrape targets every 15 seconds
+  scrape_timeout: 10s       # Timeout after 10 seconds
+  evaluation_interval: 15s  # Evaluate rules every 15 seconds
+
+  external_labels:
+    cluster: 'production'
+    environment: 'prod'
+    project: 'ai-agents'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+      timeout: 10s
+
+# Load alert rules
+rule_files:
+  - 'alerts.yml'
+  - 'recording_rules.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # AI Agent metrics
+  - job_name: 'agent'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['agent:8000']  # Docker Compose
+        labels:
+          service: 'ai-agent'
+          component: 'agent'
+    # Kubernetes service discovery (uncomment for K8s)
+    # kubernetes_sd_configs:
+    #   - role: pod
+    #     namespaces:
+    #       names:
+    #         - production-agents
+    # relabel_configs:
+    #   - source_labels: [__meta_kubernetes_pod_label_app]
+    #     action: keep
+    #     regex: production-agent
+    #   - source_labels: [__meta_kubernetes_pod_name]
+    #     target_label: pod
+    #   - source_labels: [__meta_kubernetes_namespace]
+    #     target_label: namespace
+
+  # Redis metrics
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']  # If using redis_exporter
+        labels:
+          service: 'redis'
+          component: 'cache'
+
+  # Redis Exporter (if using separate exporter container)
+  - job_name: 'redis-exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: 'redis'
+          component: 'cache'
+
+  # Node Exporter - System metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'system'
+          component: 'node'
+
+  # cAdvisor - Container metrics
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'system'
+          component: 'containers'
+
+  # Blackbox Exporter - Endpoint health checks
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://agent:8000/health
+          - http://agent:8000/ready
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+# Remote write (for long-term storage)
+# remote_write:
+#   - url: "https://prometheus-remote-write-endpoint/api/v1/write"
+#     basic_auth:
+#       username: "your_username"
+#       password: "your_password"
+#     write_relabel_configs:
+#       - source_labels: [__name__]
+#         regex: 'agent_.*'  # Only send agent metrics
+#         action: keep
+
+# Remote read (for querying long-term storage)
+# remote_read:
+#   - url: "https://prometheus-remote-read-endpoint/api/v1/read"
+#     basic_auth:
+#       username: "your_username"
+#       password: "your_password"
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus
+    retention:
+      time: 30d       # Keep data for 30 days
+      size: 50GB      # Max 50GB of storage

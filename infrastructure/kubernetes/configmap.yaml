@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: production-agents
+  labels:
+    app: production-agent
+data:
+  # Application Configuration
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+  PROMETHEUS_PORT: "8000"
+
+  # Redis Configuration
+  REDIS_URL: "redis://redis-service:6379"
+  REDIS_POOL_SIZE: "10"
+  REDIS_POOL_TIMEOUT: "5"
+
+  # Agent Configuration
+  MAX_RETRIES: "3"
+  CIRCUIT_BREAKER_THRESHOLD: "5"
+  CIRCUIT_BREAKER_TIMEOUT: "60"
+  REQUEST_TIMEOUT: "30"
+
+  # Cost Controls
+  TOKEN_BUDGET_PER_REQUEST: "10000"
+  DAILY_TOKEN_BUDGET: "1000000"
+
+  # Feature Flags
+  ENABLE_CACHING: "true"
+  ENABLE_METRICS: "true"
+  ENABLE_TRACING: "true"
+
+  # Agent Configuration File (can be mounted as a file)
+  agent.yaml: |
+    agent:
+      name: production-agent
+      version: 1.0.0
+      model: claude-3-5-sonnet-20241022
+      max_tokens: 4096
+      temperature: 0.7
+
+    reliability:
+      retries:
+        max_attempts: 3
+        backoff_multiplier: 2
+        max_backoff: 60
+      circuit_breaker:
+        failure_threshold: 5
+        recovery_timeout: 60
+      timeouts:
+        request: 30
+        tool_execution: 120
+
+    observability:
+      structured_logging: true
+      metrics_enabled: true
+      tracing_enabled: true
+      log_level: INFO
+
+    security:
+      input_validation: true
+      content_moderation: true
+      audit_logging: true
+
+    cost:
+      token_tracking: true
+      budget_enforcement: true
+      max_tokens_per_request: 10000
+      alert_threshold: 0.8

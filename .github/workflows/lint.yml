@@ -1,0 +1,200 @@
+# GitHub Actions Workflow: Lint
+#
+# Runs on: Pull requests, pushes
+# Purpose: Code quality checks (black, ruff, mypy)
+
+name: Lint
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv pip install black ruff mypy
+
+      - name: Run Black (formatting check)
+        run: |
+          black --check --diff \
+            code-examples/ \
+            --exclude "/(\.git|\.venv|__pycache__|\.pytest_cache)/"
+
+      - name: Run Ruff (linting)
+        run: |
+          ruff check \
+            code-examples/ \
+            --output-format=github \
+            --exclude ".venv,__pycache__,.pytest_cache"
+
+      - name: Run mypy (type checking)
+        continue-on-error: true  # Don't fail on type errors yet
+        run: |
+          mypy \
+            code-examples/reference-agent/ \
+            --ignore-missing-imports \
+            --no-strict-optional
+
+  format-check:
+    name: Check Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install black
+        run: uv pip install black
+
+      - name: Check if code is formatted
+        id: black-check
+        run: |
+          black --check code-examples/ || echo "needs_formatting=true" >> $GITHUB_OUTPUT
+
+      - name: Comment on PR if formatting needed
+        if: steps.black-check.outputs.needs_formatting == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '⚠️ Code needs formatting. Run `black code-examples/` to fix.'
+            })
+
+  markdown-lint:
+    name: Lint Markdown
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: '**/*.md'
+          config: '.markdownlint.json'
+          fix: false
+
+  yaml-lint:
+    name: Lint YAML
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint YAML files
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: |
+            infrastructure/kubernetes/
+            infrastructure/monitoring/
+            .github/workflows/
+          config_file: .yamllint.yml
+          strict: false
+
+  dockerfile-lint:
+    name: Lint Dockerfiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfiles with hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: infrastructure/docker/Dockerfile
+          failure-threshold: warning
+          format: sarif
+          output-file: hadolint.sarif
+
+      - name: Upload Hadolint results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint.sarif
+
+  terraform-lint:
+    name: Lint Terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Format Check
+        run: |
+          cd infrastructure/terraform/aws
+          terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: |
+          cd infrastructure/terraform/aws
+          terraform init -backend=false
+          terraform validate
+
+  lint-summary:
+    name: Lint Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, format-check, markdown-lint, yaml-lint, dockerfile-lint, terraform-lint]
+
+    steps:
+      - name: Check lint results
+        run: |
+          if [ "${{ needs.lint.result }}" != "success" ]; then
+            echo "❌ Code linting failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.format-check.result }}" != "success" ]; then
+            echo "❌ Code formatting check failed"
+            exit 1
+          fi
+
+          echo "✅ All linting checks passed!"

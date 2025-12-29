@@ -1,0 +1,252 @@
+# Prometheus Alert Rules for AI Agent System
+# Chapter 10: Incident Response
+#
+# These alert rules detect production incidents and route them based on severity.
+# Integration: Load these rules into Prometheus via prometheus.yml
+
+groups:
+  - name: agent_alerts
+    interval: 30s
+    rules:
+
+      # =====================================================================
+      # SEV1: Complete Outage
+      # =====================================================================
+      - alert: AgentCompleteOutage
+        expr: up{job="agent-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          oncall: page
+          sev: "1"
+        annotations:
+          summary: "Agent API completely down"
+          description: "All agent API instances are down for 2+ minutes. No requests being served."
+          impact: "100% of users affected. Complete service outage."
+          runbook: "https://wiki.company.com/runbooks/agent-outage"
+          dashboard: "https://grafana.company.com/agent-health"
+          action: "1. Check Kubernetes pods, 2. Check recent deployments, 3. Rollback if needed"
+
+      # =====================================================================
+      # SEV1: High Error Rate
+      # =====================================================================
+      - alert: AgentHighErrorRate
+        expr: |
+          (
+            sum(rate(agent_errors_total[5m]))
+            /
+            sum(rate(agent_requests_total[5m]))
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: critical
+          oncall: page
+          sev: "1"
+        annotations:
+          summary: "Agent error rate >10%"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 10%)"
+          impact: "Major user impact. >10% of requests failing."
+          runbook: "https://wiki.company.com/runbooks/high-error-rate"
+          dashboard: "https://grafana.company.com/agent-errors"
+          action: "1. Check error logs, 2. Check recent deployments, 3. Check external API status"
+
+      # =====================================================================
+      # SEV1: Very High Latency
+      # =====================================================================
+      - alert: AgentVeryHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(agent_response_seconds_bucket[5m])
+          ) > 30.0
+        for: 5m
+        labels:
+          severity: critical
+          oncall: page
+          sev: "1"
+        annotations:
+          summary: "Agent p95 latency >30s"
+          description: "p95 latency is {{ $value }}s (threshold: 30s)"
+          impact: "Severe degradation. Users experiencing unacceptable wait times."
+          runbook: "https://wiki.company.com/runbooks/high-latency"
+          dashboard: "https://grafana.company.com/agent-latency"
+          action: "1. Check Claude API latency, 2. Check CPU/memory, 3. Check circuit breakers"
+
+      # =====================================================================
+      # SEV2: Elevated Error Rate
+      # =====================================================================
+      - alert: AgentElevatedErrorRate
+        expr: |
+          (
+            sum(rate(agent_errors_total[5m]))
+            /
+            sum(rate(agent_requests_total[5m]))
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          oncall: page
+          sev: "2"
+        annotations:
+          summary: "Agent error rate >5%"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          impact: "Moderate user impact. >5% of requests failing."
+          runbook: "https://wiki.company.com/runbooks/elevated-error-rate"
+          dashboard: "https://grafana.company.com/agent-errors"
+
+      # =====================================================================
+      # SEV2: High Latency
+      # =====================================================================
+      - alert: AgentHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(agent_response_seconds_bucket[5m])
+          ) > 10.0
+        for: 10m
+        labels:
+          severity: warning
+          oncall: page
+          sev: "2"
+        annotations:
+          summary: "Agent p95 latency >10s"
+          description: "p95 latency is {{ $value }}s (threshold: 10s)"
+          impact: "Degraded performance. Users experiencing slow responses."
+          runbook: "https://wiki.company.com/runbooks/high-latency"
+          dashboard: "https://grafana.company.com/agent-latency"
+
+      # =====================================================================
+      # SEV2: Daily Budget Approaching Limit
+      # =====================================================================
+      - alert: AgentBudgetNearLimit
+        expr: |
+          (
+            increase(agent_cost_dollars_total[24h])
+            /
+            agent_daily_budget_dollars
+          ) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          oncall: page
+          sev: "2"
+        annotations:
+          summary: "Daily budget >90% consumed"
+          description: "{{ $value | humanizePercentage }} of daily budget used"
+          impact: "Budget enforcement may trigger soon, blocking new requests."
+          runbook: "https://wiki.company.com/runbooks/budget-limit"
+          dashboard: "https://grafana.company.com/agent-cost"
+
+      # =====================================================================
+      # SEV3: Queue Depth Growing
+      # =====================================================================
+      - alert: AgentQueueDepthHigh
+        expr: agent_queue_depth > 1000
+        for: 15m
+        labels:
+          severity: warning
+          oncall: slack
+          sev: "3"
+        annotations:
+          summary: "Agent queue depth >1000"
+          description: "Queue has {{ $value }} jobs waiting (threshold: 1000)"
+          impact: "Growing backlog. Response times will increase."
+          runbook: "https://wiki.company.com/runbooks/queue-depth"
+          dashboard: "https://grafana.company.com/agent-queue"
+
+      # =====================================================================
+      # SEV3: Circuit Breaker Open
+      # =====================================================================
+      - alert: AgentCircuitBreakerOpen
+        expr: agent_circuit_breaker_state{state="open"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          oncall: slack
+          sev: "3"
+        annotations:
+          summary: "Circuit breaker open for {{ $labels.dependency }}"
+          description: "Circuit breaker protecting {{ $labels.dependency }} is open"
+          impact: "Requests to {{ $labels.dependency }} are being failed immediately."
+          runbook: "https://wiki.company.com/runbooks/circuit-breaker"
+          dashboard: "https://grafana.company.com/agent-circuit-breakers"
+
+      # =====================================================================
+      # SEV3: Low Cache Hit Rate
+      # =====================================================================
+      - alert: AgentLowCacheHitRate
+        expr: |
+          (
+            rate(agent_cache_hits_total[30m])
+            /
+            (rate(agent_cache_hits_total[30m]) + rate(agent_cache_misses_total[30m]))
+          ) < 0.5
+        for: 30m
+        labels:
+          severity: info
+          oncall: slack
+          sev: "3"
+        annotations:
+          summary: "Cache hit rate <50%"
+          description: "Cache hit rate dropped to {{ $value | humanizePercentage }} (threshold: 50%)"
+          impact: "Increased API costs and latency due to cache misses."
+          runbook: "https://wiki.company.com/runbooks/cache-performance"
+          dashboard: "https://grafana.company.com/agent-cache"
+
+      # =====================================================================
+      # SEV3: High Token Usage
+      # =====================================================================
+      - alert: AgentHighTokenUsage
+        expr: rate(agent_tokens_used_total[5m]) > 10000
+        for: 15m
+        labels:
+          severity: info
+          oncall: slack
+          sev: "3"
+        annotations:
+          summary: "High token usage rate"
+          description: "Using {{ $value }} tokens/second (threshold: 10000)"
+          impact: "Elevated API costs. May indicate inefficient prompts."
+          runbook: "https://wiki.company.com/runbooks/high-token-usage"
+          dashboard: "https://grafana.company.com/agent-cost"
+
+      # =====================================================================
+      # SEV4: Pod Restart Loop
+      # =====================================================================
+      - alert: AgentPodRestartLoop
+        expr: rate(kube_pod_container_status_restarts_total{pod=~"agent-.*"}[15m]) > 0
+        for: 10m
+        labels:
+          severity: info
+          oncall: slack
+          sev: "4"
+        annotations:
+          summary: "Agent pod restarting frequently"
+          description: "Pod {{ $labels.pod }} restarting at {{ $value }} restarts/min"
+          impact: "Pod instability. May indicate memory leaks or crashes."
+          runbook: "https://wiki.company.com/runbooks/pod-restarts"
+          dashboard: "https://grafana.company.com/kubernetes-pods"
+
+      # =====================================================================
+      # SEV4: Stale Jobs
+      # =====================================================================
+      - alert: AgentStaleJobs
+        expr: agent_stale_jobs_count > 10
+        for: 30m
+        labels:
+          severity: info
+          oncall: slack
+          sev: "4"
+        annotations:
+          summary: "Stale jobs detected"
+          description: "{{ $value }} jobs stuck in processing state >5 minutes"
+          impact: "Potential runaway agents or hung requests."
+          runbook: "https://wiki.company.com/runbooks/stale-jobs"
+          dashboard: "https://grafana.company.com/agent-queue"
+
+# Usage:
+# 1. Load this file in prometheus.yml:
+#    rule_files:
+#      - "alerts/agent-rules.yaml"
+# 2. Configure Alertmanager to route based on 'oncall' label:
+#    - oncall: page → PagerDuty
+#    - oncall: slack → Slack channel
+# 3. Create runbooks for each alert at the URLs specified

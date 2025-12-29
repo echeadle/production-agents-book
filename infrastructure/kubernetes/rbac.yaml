@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-service-account
+  namespace: production-agents
+  labels:
+    app: production-agent
+
+---
+# Role for agent permissions within the namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-role
+  namespace: production-agents
+  labels:
+    app: production-agent
+rules:
+  # Allow reading ConfigMaps (for dynamic config reloading)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # Allow reading Secrets (if needed)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+
+  # Allow creating/updating Events (for audit logging)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # If agent needs to watch its own pods (for coordination)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+# RoleBinding to bind the Role to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-rolebinding
+  namespace: production-agents
+  labels:
+    app: production-agent
+subjects:
+  - kind: ServiceAccount
+    name: agent-service-account
+    namespace: production-agents
+roleRef:
+  kind: Role
+  name: agent-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRole (if agent needs cluster-wide permissions)
+# Uncomment if needed - use sparingly!
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRole
+# metadata:
+#   name: agent-cluster-role
+#   labels:
+#     app: production-agent
+# rules:
+#   - apiGroups: [""]
+#     resources: ["nodes"]
+#     verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding (if using ClusterRole)
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: agent-cluster-rolebinding
+#   labels:
+#     app: production-agent
+# subjects:
+#   - kind: ServiceAccount
+#     name: agent-service-account
+#     namespace: production-agents
+# roleRef:
+#   kind: ClusterRole
+#   name: agent-cluster-role
+#   apiGroup: rbac.authorization.k8s.io

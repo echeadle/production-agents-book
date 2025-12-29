@@ -1,0 +1,325 @@
+# PostgreSQL Cross-Region Replication
+# Chapter 11: Multi-Region Deployment
+#
+# Uses CloudNativePG (CNPG) for Kubernetes-native PostgreSQL with
+# cross-region replication via S3 backup/restore for disaster recovery.
+
+# =========================================================================
+# Primary PostgreSQL Cluster (US-East)
+# =========================================================================
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: agent-postgres-primary
+  namespace: production-agents
+spec:
+  instances: 3  # 1 primary + 2 replicas for HA
+
+  # PostgreSQL configuration
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "2GB"
+      effective_cache_size: "6GB"
+      maintenance_work_mem: "512MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      work_mem: "10MB"
+      min_wal_size: "1GB"
+      max_wal_size: "4GB"
+
+  # Storage
+  storage:
+    size: 500Gi
+    storageClass: gp3
+
+  # Backup configuration (to S3)
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://agent-backups-us/postgres-primary
+      s3Credentials:
+        accessKeyId:
+          name: aws-credentials
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: aws-credentials
+          key: SECRET_ACCESS_KEY
+        region:
+          name: aws-credentials
+          key: REGION
+
+      # Backup retention
+      retentionPolicy: "30d"
+
+      # WAL archiving for point-in-time recovery
+      wal:
+        compression: gzip
+        encryption: AES256
+
+    # Backup schedule
+    schedule: "0 0 * * *"  # Daily at midnight UTC
+
+  # Monitoring
+  monitoring:
+    enabled: true
+    prometheusRule:
+      enabled: true
+
+  # Resources
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "2"
+    limits:
+      memory: "8Gi"
+      cpu: "4"
+
+  # Affinity (spread across availability zones)
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: postgresql
+                operator: In
+                values:
+                  - agent-postgres-primary
+          topologyKey: topology.kubernetes.io/zone
+
+---
+# =========================================================================
+# Replica PostgreSQL Cluster (EU-West) - Read-Only Replication
+# =========================================================================
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: agent-postgres-replica
+  namespace: production-agents
+spec:
+  instances: 2  # Smaller replica cluster
+
+  # Replica configuration - restore from US primary backup
+  bootstrap:
+    recovery:
+      source: agent-postgres-primary-backup
+
+      # Recovery target: Latest available (continuous replication)
+      recoveryTarget:
+        targetTime: ""  # Empty = latest
+        backupID: ""    # Empty = latest backup
+
+  # External cluster reference (primary in US)
+  externalClusters:
+    - name: agent-postgres-primary-backup
+      barmanObjectStore:
+        destinationPath: s3://agent-backups-us/postgres-primary
+        s3Credentials:
+          accessKeyId:
+            name: aws-credentials
+            key: ACCESS_KEY_ID
+          secretAccessKey:
+            name: aws-credentials
+            key: SECRET_ACCESS_KEY
+          region:
+            name: aws-credentials
+            key: REGION
+        wal:
+          compression: gzip
+          encryption: AES256
+
+  # PostgreSQL configuration (same as primary)
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "2GB"
+      effective_cache_size: "6GB"
+
+  # Storage (smaller for replica)
+  storage:
+    size: 300Gi
+    storageClass: gp3
+
+  # Backup (replica can also back up locally)
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://agent-backups-eu/postgres-replica
+      s3Credentials:
+        accessKeyId:
+          name: aws-credentials
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: aws-credentials
+          key: SECRET_ACCESS_KEY
+        region:
+          name: aws-credentials
+          key: REGION_EU
+      retentionPolicy: "7d"  # Shorter retention for replica
+
+  # Resources (smaller for replica)
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1"
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+
+---
+# =========================================================================
+# AWS Credentials Secret
+# =========================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+  namespace: production-agents
+type: Opaque
+stringData:
+  ACCESS_KEY_ID: "AKIA..."  # Replace with actual credentials (use Sealed Secrets in production)
+  SECRET_ACCESS_KEY: "..."
+  REGION: "us-east-1"
+  REGION_EU: "eu-west-1"
+
+---
+# =========================================================================
+# Service for Primary Database
+# =========================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: production-agents
+spec:
+  selector:
+    postgresql: agent-postgres-primary
+    role: primary
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# =========================================================================
+# Service for Replica Database (Read-Only)
+# =========================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+  namespace: production-agents
+spec:
+  selector:
+    postgresql: agent-postgres-replica
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# =========================================================================
+# Failover Procedure (Manual - For DR)
+# =========================================================================
+
+# When primary region (US) fails completely:
+
+# 1. Promote EU replica to primary:
+#    kubectl cnpg promote agent-postgres-replica -n production-agents
+
+# 2. Reconfigure application to use EU database:
+#    kubectl set env deployment/agent-deployment \
+#      DATABASE_URL=postgresql://postgres@postgres-replica:5432/agent \
+#      -n production-agents
+
+# 3. Monitor promotion:
+#    kubectl cnpg status agent-postgres-replica -n production-agents
+
+# 4. Verify writes work:
+#    psql -h postgres-replica -U postgres -c "INSERT INTO test VALUES (1);"
+
+# 5. When US region restored, set up reverse replication:
+#    - Recreate US cluster as replica of EU
+#    - Or restore from backup and re-establish replication
+
+---
+# =========================================================================
+# Monitoring Queries
+# =========================================================================
+
+# Check replication lag:
+# SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) AS replication_lag_seconds;
+
+# Check if replica is in recovery mode:
+# SELECT pg_is_in_recovery();  -- Should return true for replica
+
+# Check WAL receiver status:
+# SELECT status, received_lsn, received_tli FROM pg_stat_wal_receiver;
+
+# Check replication slot status:
+# SELECT slot_name, active, restart_lsn FROM pg_replication_slots;
+
+---
+# =========================================================================
+# Prometheus ServiceMonitor for Database Metrics
+# =========================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgres-primary
+  namespace: production-agents
+spec:
+  selector:
+    matchLabels:
+      postgresql: agent-postgres-primary
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgres-replica
+  namespace: production-agents
+spec:
+  selector:
+    matchLabels:
+      postgresql: agent-postgres-replica
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+
+---
+# =========================================================================
+# Notes and Best Practices
+# =========================================================================
+
+# 1. RPO (Recovery Point Objective): ~5 minutes
+#    - Determined by WAL archiving frequency
+#    - Continuous WAL shipping minimizes data loss
+
+# 2. RTO (Recovery Time Objective): ~15 minutes
+#    - Time to promote replica to primary
+#    - Time to reconfigure applications
+#    - Time for DNS/routing changes
+
+# 3. Testing:
+#    - Test failover monthly
+#    - Verify backups can be restored
+#    - Practice promotion procedure
+
+# 4. Costs:
+#    - S3 storage: ~$50/month (500GB × $0.023 + $0.023/GB transfer)
+#    - EBS storage: ~$400/month (800GB × $0.10/GB-month)
+#    - Total: ~$450/month for database storage
+
+# 5. Alternatives:
+#    - Logical replication (for partial data sync)
+#    - Streaming replication (for near-realtime sync, but requires VPC peering)
+#    - Read replicas (for read scaling, not DR)

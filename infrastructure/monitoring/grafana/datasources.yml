@@ -1,0 +1,66 @@
+# Grafana Data Sources Configuration
+#
+# This file automatically provisions data sources in Grafana
+
+apiVersion: 1
+
+datasources:
+  # Prometheus - Metrics
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: "15s"
+      queryTimeout: "60s"
+      httpMethod: POST
+    version: 1
+
+  # Loki - Logs
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # Link logs to traces using request_id
+        - datasourceUid: tempo
+          matcherRegex: "request_id=([\\w-]+)"
+          name: TraceID
+          url: "$${__value.raw}"
+    version: 1
+
+  # Tempo - Traces (if using distributed tracing)
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      tracesToLogs:
+        datasourceUid: loki
+        tags: ['request_id']
+        mappedTags: [{ key: 'request_id', value: 'request_id' }]
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+      nodeGraph:
+        enabled: true
+    version: 1
+
+  # Redis - Direct Redis metrics (if using Redis data source plugin)
+  - name: Redis
+    type: redis-datasource
+    access: proxy
+    url: redis://redis:6379
+    editable: true
+    jsonData:
+      client: standalone
+      poolSize: 5
+      timeout: 10
+      pingInterval: 0
+      pipelineWindow: 0
+    version: 1

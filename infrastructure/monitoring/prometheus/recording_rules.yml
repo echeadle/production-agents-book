@@ -1,0 +1,248 @@
+# Prometheus Recording Rules
+#
+# Pre-compute frequently used queries to improve dashboard performance
+# and simplify alert expressions
+
+groups:
+  # Request metrics
+  - name: request_metrics
+    interval: 30s
+    rules:
+      # Request rate (requests per second)
+      - record: job:agent_requests:rate5m
+        expr: rate(agent_requests_total[5m])
+
+      - record: job:agent_requests:rate1h
+        expr: rate(agent_requests_total[1h])
+
+      # Error rate
+      - record: job:agent_errors:rate5m
+        expr: rate(agent_errors_total[5m])
+
+      # Error ratio (percentage)
+      - record: job:agent_errors:ratio5m
+        expr: |
+          rate(agent_errors_total[5m])
+          /
+          rate(agent_requests_total[5m])
+
+      - record: job:agent_errors:ratio1h
+        expr: |
+          rate(agent_errors_total[1h])
+          /
+          rate(agent_requests_total[1h])
+
+  # Latency metrics
+  - name: latency_metrics
+    interval: 30s
+    rules:
+      # P50 latency
+      - record: job:agent_request_duration:p50
+        expr: histogram_quantile(0.50, rate(agent_request_duration_seconds_bucket[5m]))
+
+      # P95 latency
+      - record: job:agent_request_duration:p95
+        expr: histogram_quantile(0.95, rate(agent_request_duration_seconds_bucket[5m]))
+
+      # P99 latency
+      - record: job:agent_request_duration:p99
+        expr: histogram_quantile(0.99, rate(agent_request_duration_seconds_bucket[5m]))
+
+      # Average latency
+      - record: job:agent_request_duration:avg
+        expr: |
+          rate(agent_request_duration_seconds_sum[5m])
+          /
+          rate(agent_request_duration_seconds_count[5m])
+
+  # Token and cost metrics
+  - name: cost_metrics
+    interval: 1m
+    rules:
+      # Token usage rate (tokens per second)
+      - record: job:agent_tokens:rate5m
+        expr: rate(agent_tokens_used_total[5m])
+
+      - record: job:agent_tokens:rate1h
+        expr: rate(agent_tokens_used_total[1h])
+
+      # Average tokens per request
+      - record: job:agent_tokens_per_request:avg
+        expr: |
+          rate(agent_tokens_used_total[5m])
+          /
+          rate(agent_requests_total[5m])
+
+      # Cost rate (dollars per second)
+      - record: job:agent_cost:rate5m
+        expr: rate(agent_cost_dollars_total[5m])
+
+      - record: job:agent_cost:rate1h
+        expr: rate(agent_cost_dollars_total[1h])
+
+      # Daily cost projection
+      - record: job:agent_cost:daily_projection
+        expr: rate(agent_cost_dollars_total[1h]) * 24
+
+      # Monthly cost projection
+      - record: job:agent_cost:monthly_projection
+        expr: rate(agent_cost_dollars_total[1h]) * 24 * 30
+
+  # Circuit breaker metrics
+  - name: circuit_breaker_metrics
+    interval: 30s
+    rules:
+      # Circuit breaker open count
+      - record: job:agent_circuit_breaker_open:count
+        expr: count(agent_circuit_breaker_state{state="open"} == 1)
+
+      # Circuit breaker trip rate
+      - record: job:agent_circuit_breaker_trips:rate5m
+        expr: rate(agent_circuit_breaker_trips_total[5m])
+
+  # Retry metrics
+  - name: retry_metrics
+    interval: 30s
+    rules:
+      # Retry rate
+      - record: job:agent_retries:rate5m
+        expr: rate(agent_retries_total[5m])
+
+      # Retry ratio (percentage of requests that retry)
+      - record: job:agent_retries:ratio5m
+        expr: |
+          rate(agent_retries_total[5m])
+          /
+          rate(agent_requests_total[5m])
+
+  # Redis metrics
+  - name: redis_metrics
+    interval: 30s
+    rules:
+      # Cache hit rate
+      - record: job:redis_cache_hit:rate5m
+        expr: |
+          rate(redis_keyspace_hits_total[5m])
+          /
+          (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))
+
+      # Memory usage percentage
+      - record: job:redis_memory:usage_percent
+        expr: redis_memory_used_bytes / redis_memory_max_bytes * 100
+
+      # Commands per second
+      - record: job:redis_commands:rate5m
+        expr: rate(redis_commands_processed_total[5m])
+
+  # Resource utilization
+  - name: resource_metrics
+    interval: 30s
+    rules:
+      # CPU usage per pod
+      - record: pod:container_cpu:usage_rate5m
+        expr: rate(container_cpu_usage_seconds_total{pod=~"agent-.*"}[5m])
+
+      # Memory usage per pod
+      - record: pod:container_memory:usage_bytes
+        expr: container_memory_working_set_bytes{pod=~"agent-.*"}
+
+      # Memory usage percentage
+      - record: pod:container_memory:usage_percent
+        expr: |
+          container_memory_working_set_bytes{pod=~"agent-.*"}
+          /
+          container_spec_memory_limit_bytes{pod=~"agent-.*"}
+          * 100
+
+  # Availability and SLO
+  - name: slo_metrics
+    interval: 5m
+    rules:
+      # Availability (uptime percentage)
+      - record: job:agent_availability:ratio5m
+        expr: avg(up{job="agent"})
+
+      - record: job:agent_availability:ratio1h
+        expr: avg_over_time(up{job="agent"}[1h])
+
+      # Success rate
+      - record: job:agent_success:ratio5m
+        expr: |
+          1 - (
+            rate(agent_errors_total[5m])
+            /
+            rate(agent_requests_total[5m])
+          )
+
+      # Error budget remaining (assuming 99.9% SLO)
+      - record: job:agent_error_budget:remaining_percent
+        expr: |
+          (
+            1 - (
+              sum(increase(agent_errors_total[30d]))
+              /
+              sum(increase(agent_requests_total[30d]))
+            )
+          )
+          /
+          0.001  # 0.1% error budget
+          * 100
+
+      # Error budget burn rate
+      - record: job:agent_error_budget:burn_rate5m
+        expr: |
+          (
+            rate(agent_errors_total[5m]) / rate(agent_requests_total[5m])
+          )
+          /
+          (1 - 0.999)  # 99.9% SLO
+
+  # External API metrics
+  - name: external_api_metrics
+    interval: 1m
+    rules:
+      # Anthropic API request rate
+      - record: job:anthropic_api_requests:rate5m
+        expr: rate(agent_anthropic_api_requests_total[5m])
+
+      # Anthropic API error rate
+      - record: job:anthropic_api_errors:rate5m
+        expr: rate(agent_anthropic_api_errors_total[5m])
+
+      # Anthropic API error ratio
+      - record: job:anthropic_api_errors:ratio5m
+        expr: |
+          rate(agent_anthropic_api_errors_total[5m])
+          /
+          rate(agent_anthropic_api_requests_total[5m])
+
+      # Anthropic API P95 latency
+      - record: job:anthropic_api_duration:p95
+        expr: histogram_quantile(0.95, rate(agent_anthropic_api_duration_seconds_bucket[5m]))
+
+  # Aggregations across all instances
+  - name: aggregate_metrics
+    interval: 1m
+    rules:
+      # Total requests across all instances
+      - record: cluster:agent_requests:sum_rate5m
+        expr: sum(rate(agent_requests_total[5m]))
+
+      # Total errors across all instances
+      - record: cluster:agent_errors:sum_rate5m
+        expr: sum(rate(agent_errors_total[5m]))
+
+      # Cluster-wide error ratio
+      - record: cluster:agent_errors:ratio5m
+        expr: |
+          sum(rate(agent_errors_total[5m]))
+          /
+          sum(rate(agent_requests_total[5m]))
+
+      # Total token usage across all instances
+      - record: cluster:agent_tokens:sum_rate5m
+        expr: sum(rate(agent_tokens_used_total[5m]))
+
+      # Total cost across all instances
+      - record: cluster:agent_cost:sum_rate5m
+        expr: sum(rate(agent_cost_dollars_total[5m]))

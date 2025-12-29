@@ -1,0 +1,68 @@
+# ServiceMonitor for Prometheus Operator
+# This tells Prometheus Operator how to scrape metrics from the agent
+#
+# Requires: Prometheus Operator to be installed
+# Install: kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/main/bundle.yaml
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agent-metrics
+  namespace: production-agents
+  labels:
+    app: production-agent
+    release: prometheus  # Must match Prometheus Operator's serviceMonitorSelector
+spec:
+  selector:
+    matchLabels:
+      app: production-agent
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+      scheme: http
+      scrapeTimeout: 10s
+      # Relabeling (optional)
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+
+---
+# ServiceMonitor for Redis
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-metrics
+  namespace: production-agents
+  labels:
+    app: redis
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+      scheme: http
+
+---
+# PodMonitor (alternative to ServiceMonitor - scrapes pods directly)
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agent-pod-metrics
+  namespace: production-agents
+  labels:
+    app: production-agent
+spec:
+  selector:
+    matchLabels:
+      app: production-agent
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
